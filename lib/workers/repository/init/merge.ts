@@ -221,6 +221,18 @@ export async function mergeRenovateConfig(
     logger.debug('Found npmrc in decrypted config - setting');
     npmApi.setNpmrc(decryptedConfig.npmrc);
   }
+
+  const shallowResolvedConfig = await decryptConfig(
+    await presets.resolveConfigPresets(
+      decryptedConfig,
+      config,
+      [],
+      [],
+      true // resolve shallow config
+    ),
+    repository
+  );
+  logger.debug({ config: shallowResolvedConfig }, 'shallow config');
   // Decrypt after resolving in case the preset contains npm authentication instead
   let resolvedConfig = await decryptConfig(
     await presets.resolveConfigPresets(

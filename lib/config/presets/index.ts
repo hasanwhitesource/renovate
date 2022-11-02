@@ -45,6 +45,9 @@ const gitPresetRegex = regEx(
   /^(?<repo>~?[\w\-. /]+)(?::(?<presetName>[\w\-.+/]+))?(?:#(?<tag>[\w\-./]+?))?$/
 );
 
+// shallow mode preset to ignore regex
+const whitesourcePresetRegex = regEx(/^(?:.+?>)?whitesource\//);
+
 export function replaceArgs(
   obj: string,
   argMapping: Record<string, any>
@@ -272,7 +275,8 @@ export async function resolveConfigPresets(
   inputConfig: AllConfig,
   baseConfig?: RenovateConfig,
   _ignorePresets?: string[],
-  existingPresets: string[] = []
+  existingPresets: string[] = [],
+  shallowResolve = false
 ): Promise<AllConfig> {
   let ignorePresets = clone(_ignorePresets);
   if (!ignorePresets || ignorePresets.length === 0) {
@@ -283,9 +287,16 @@ export async function resolveConfigPresets(
     'resolveConfigPresets'
   );
   let config: AllConfig = {};
+  // Contains unresolved renovate internal presets when running in shallow resolve mode
+  const unresolvedPresets: string[] = [];
   // First, merge all the preset configs from left to right
   if (inputConfig.extends?.length) {
     for (const preset of inputConfig.extends) {
+      // Dont resolve renovate internal presets
+      if (shallowResolve && isRenovateInternalPreset(preset)) {
+        unresolvedPresets.push(preset);
+        continue;
+      }
       if (shouldResolvePreset(preset, existingPresets, ignorePresets)) {
         logger.trace(`Resolving preset "${preset}"`);
         const fetchedPreset = await fetchPreset(
@@ -298,12 +309,24 @@ export async function resolveConfigPresets(
           fetchedPreset,
           baseConfig ?? inputConfig,
           ignorePresets,
-          existingPresets.concat([preset])
+          existingPresets.concat([preset]),
+          shallowResolve
         );
         // istanbul ignore if
         if (inputConfig?.ignoreDeps?.length === 0) {
           delete presetConfig.description;
         }
+
+        if (shallowResolve && presetConfig?.extends) {
+          // Save extends array to not lose values from it
+          for (const extend of presetConfig.extends) {
+            // Dont resolve renovate internal presets
+            if (isRenovateInternalPreset(extend)) {
+              unresolvedPresets.push(extend);
+            }
+          }
+        }
+        // Now assign "regular" config on top
         config = mergeChildConfig(config, presetConfig);
       }
     }
@@ -311,7 +334,9 @@ export async function resolveConfigPresets(
   logger.trace({ config }, `Post-preset resolve config`);
   // Now assign "regular" config on top
   config = mergeChildConfig(config, inputConfig);
-  delete config.extends;
+  if (!shallowResolve) {
+    delete config.extends;
+  }
   delete config.ignorePresets;
   logger.trace({ config }, `Post-merge resolve config`);
   for (const [key, val] of Object.entries(config)) {
@@ -326,7 +351,8 @@ export async function resolveConfigPresets(
               element as RenovateConfig,
               baseConfig,
               ignorePresets,
-              existingPresets
+              existingPresets,
+              shallowResolve
             )
           );
         } else {
@@ -340,13 +366,63 @@ export async function resolveConfigPresets(
         val as RenovateConfig,
         baseConfig,
         ignorePresets,
-        existingPresets
+        existingPresets,
+        shallowResolve
       );
     }
   }
   logger.trace({ config: inputConfig }, 'Input config');
   logger.trace({ config }, 'Resolved config');
+  if (shallowResolve) {
+    config.extends = mergeUnresolvedPresets(config.extends, unresolvedPresets);
+    if (config?.extends?.length === 0) {
+      delete config.extends;
+    }
+  }
   return config;
+}
+
+/**
+ * This function does the following:
+ *    1. removes resolved external presets from the array.
+ *    2. cleans duplicate presets keys (from different resolution levels).
+ * @param presets
+ * @param unresolvedPresets
+ * @return Unresolved presets array when shallowResolve is enabled
+ */
+function mergeUnresolvedPresets(
+  presets: string[] | undefined,
+  unresolvedPresets: string[]
+): string[] {
+  if (!presets?.length) {
+    return [];
+  }
+  const currentUnresolved = presets.filter((e) => isRenovateInternalPreset(e));
+  return Array.from(new Set([...currentUnresolved, ...unresolvedPresets]));
+}
+
+function isRenovateInternalPreset(preset: string): boolean {
+  if (whitesourcePresetRegex.test(preset)) {
+    return true;
+  }
+  return !(isLocalPreset(preset) || isUserExternalPreset(preset));
+}
+
+function isUserExternalPreset(preset: string): boolean {
+  return (
+    preset.startsWith('github>') ||
+    preset.startsWith('gitlab>') ||
+    preset.startsWith('gitea>')
+  );
+}
+
+function isLocalPreset(preset: string): boolean {
+  if (preset.startsWith('local>')) {
+    return true;
+  }
+  return (
+    !preset.startsWith('@') && !preset.startsWith(':') && preset.includes('/')
+  );
 }
 
 async function fetchPreset(
